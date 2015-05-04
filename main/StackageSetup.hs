@@ -36,7 +36,7 @@ import System.FilePath (searchPathSeparator, getSearchPath)
 import System.Environment (lookupEnv, getEnv, setEnv)
 import System.Exit (exitFailure)
 import System.Process (callProcess, readProcess)
-import qualified Paths_stackage_cli as CabalInfo
+import qualified Paths_stackage_setup as CabalInfo
 
 import qualified Prelude
 import Prelude (Bool(..))
