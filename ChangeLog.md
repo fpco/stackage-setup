@@ -1,3 +1,7 @@
+## 0.0.1
+
+* Added library (stubbed)
+
 ## 0.0.0.1
 
 * `stackage-setup nightly` now works as expected
