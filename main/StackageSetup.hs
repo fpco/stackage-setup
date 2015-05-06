@@ -205,10 +205,10 @@ curryReaderT tup m =
 arch :: String
 arch = "linux64"
 
-ltsSnapshotsReq :: (MonadThrow m, GetConfig m) => m Request
-ltsSnapshotsReq = do
+snapshotsReq :: (MonadThrow m, GetConfig m) => m Request
+snapshotsReq = do
   stackageHost <- getStackageHost
-  parseUrl $ stackageHost <> "/download/lts-snapshots.json"
+  parseUrl $ stackageHost <> "/download/snapshots.json"
 
 ghcMajorVersionReq :: (MonadThrow m, GetConfig m) => Snapshot -> m Request
 ghcMajorVersionReq snapshot = do
@@ -224,22 +224,22 @@ setupTargetParser :: Parser SetupTarget
 setupTargetParser = strArgument mods where
   mods = metavar "TARGET" <> value "lts"
 
-refreshLtsSnapshots ::
+refreshSnapshots ::
   ( HasHttpManager env
   , MonadReader env m
   , GetConfig m
   , MonadThrow m
   , MonadIO m
   ) => m (HashMap String String)
-refreshLtsSnapshots = do
+refreshSnapshots = do
   stackageRoot <- getStackageRoot
-  let path = Path.encodeString $ stackageRoot </> ltsSnapshotsPath
+  let path = Path.encodeString $ stackageRoot </> snapshotsPath
 
-  response <- httpLbs =<< ltsSnapshotsReq
+  response <- httpLbs =<< snapshotsReq
   let lbs = responseBody response
   liftIO $ LByteString.writeFile path lbs
 
-  either (throwM . ParseLtsSnapshotsError) return $ Aeson.eitherDecode lbs
+  either (throwM . ParseSnapshotsError) return $ Aeson.eitherDecode lbs
 
 
 getLinks ::
@@ -283,7 +283,7 @@ type Snapshot = String
 
 data SetupExceptions
   = SeriesNotFound Series
-  | ParseLtsSnapshotsError String
+  | ParseSnapshotsError String
   | ParseLinksError Yaml.ParseException
   | StackageRootNotFound
   deriving (Show, Typeable)
@@ -291,6 +291,7 @@ instance Exception SetupExceptions
 
 readSeries :: String -> Maybe Series
 readSeries s@"lts" = Just s
+readSeries s@"nightly" = Just s
 readSeries s@(stripPrefix "lts-" -> Just sver)
   | all Char.isNumber sver = Just s
 readSeries (stripPrefix "lts/" -> Just sver)
@@ -328,8 +329,8 @@ lookupSnapshot ::
   , MonadIO m
   ) => Series -> m Snapshot
 lookupSnapshot series = do
-  ltsSnapshots <- refreshLtsSnapshots
-  case HashMap.lookup series ltsSnapshots of
+  snapshots <- refreshSnapshots
+  case HashMap.lookup series snapshots of
     Just snapshot -> return snapshot
     Nothing -> throwM $ SeriesNotFound series
 
@@ -600,8 +601,8 @@ downloadPath :: Text -> Text -> Path.FilePath
 downloadPath name version =
   Path.fromText (name <> "-" <> version)
 
-ltsSnapshotsPath :: Path.FilePath
-ltsSnapshotsPath = Path.fromText "lts-snapshots.json"
+snapshotsPath :: Path.FilePath
+snapshotsPath = Path.fromText "snapshots.json"
 
 linksPath :: GhcMajorVersion -> Path.FilePath
 linksPath ghcMajorVersion = Path.fromText $ "ghc-" <> pack ghcMajorVersion <> "-links.yaml"
