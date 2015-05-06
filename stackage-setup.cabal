@@ -1,5 +1,5 @@
 name:                stackage-setup
-version:             0.0.0
+version:             0.0.0.1
 synopsis:
   An executable for downloading a Haskell setup
 description:
