@@ -22,6 +22,7 @@ import qualified Data.Char as Char
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List
 import Data.Monoid
+import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LText
 import qualified Data.Text.Lazy.Encoding as LText
 import qualified Data.Yaml as Yaml
@@ -30,8 +31,7 @@ import Stackage.CLI
 import Network.HTTP.Client.Conduit
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (hUserAgent)
-import Filesystem
-import qualified Filesystem.Path.CurrentOS as Path
+import System.Directory
 import System.FilePath (searchPathSeparator, getSearchPath)
 import System.Environment (lookupEnv, getEnv, setEnv)
 import System.Exit (exitFailure)
@@ -136,19 +136,19 @@ instance HasConfig R where
 getStackageRootIO :: IO FilePath
 getStackageRootIO = do
   stackageRoot <- lookupEnv "STACKAGE_ROOT" >>= \case
-    Just dir -> return $ Path.decodeString dir
+    Just dir -> return $ dir
     Nothing -> do
       -- TODO: windows-ify
       home <- lookupEnv "HOME" >>= \case
         Just homeStr -> return (fromString homeStr)
         Nothing -> throwIO StackageRootNotFound
       return (home </> ".stackage")
-  createTree stackageRoot
+  createDirectoryIfMissing True stackageRoot
   return stackageRoot
 
 readFileMay :: FilePath -> IO (Maybe ByteString)
 readFileMay path = do
-  exists <- isFile path
+  exists <- doesFileExist path
   if exists
     then Just <$> ClassyPrelude.readFile path
     else return Nothing
@@ -233,7 +233,7 @@ refreshSnapshots ::
   ) => m (HashMap String String)
 refreshSnapshots = do
   stackageRoot <- getStackageRoot
-  let path = Path.encodeString $ stackageRoot </> snapshotsPath
+  let path = stackageRoot </> snapshotsPath
 
   response <- httpLbs =<< snapshotsReq
   let lbs = responseBody response
@@ -254,7 +254,7 @@ getLinks ghcMajorVersion = do
   response <- httpLbs =<< getLinksReq ghcMajorVersion
   let lbs = responseBody response
       bs = LByteString.toStrict lbs
-      path = Path.encodeString $ stackageRoot </> linksPath ghcMajorVersion
+      path = stackageRoot </> linksPath ghcMajorVersion
   liftIO $ LByteString.writeFile path lbs
 
   either (throwM . ParseLinksError) return $ Yaml.decodeEither' bs
@@ -364,10 +364,10 @@ setup target = do
   stackageRoot <- getStackageRoot
   forM_ links $ \d@Download{..} -> do
     let dir = stackageRoot </> downloadDir downloadName
-    liftIO $ createTree dir
+    liftIO $ createDirectoryIfMissing True dir
 
     let versionedDir = dir </> downloadPath downloadName downloadVersion
-    exists <- liftIO $ isDirectory versionedDir
+    exists <- liftIO $ doesDirectoryExist versionedDir
 
     if (not exists)
       then do
@@ -392,17 +392,17 @@ depsFor _          = []
 augmentPath :: MonadIO m => FilePath -> m ()
 augmentPath pathHead = liftIO $ do
   pathRest <- getSearchPath
-  let paths = fpToString pathHead : pathRest
+  let paths = pathHead : pathRest
       path = intercalate [searchPathSeparator] paths
   setEnv "PATH" path
 
 
 postDownload :: (MonadIO m)
-  => Download -> Path.FilePath -> Path.FilePath -> m ()
+  => Download -> FilePath -> FilePath -> m ()
 postDownload d@Download{..} dir versionedDir = do
   expectInstructions downloadName d dir versionedDir
 
-expectInstructions :: (MonadIO m) => Text -> Download -> Path.FilePath -> Path.FilePath -> m ()
+expectInstructions :: (MonadIO m) => Text -> Download -> FilePath -> FilePath -> m ()
 expectInstructions "ghc" = expectGhcInstructions
 expectInstructions "cabal" = expectCabalInstructions
 expectInstructions "stackage" = justUnpackInstructions
@@ -415,7 +415,7 @@ unexpectedInstructions t Download{..} dir _ = do
   putStrLn $ "Unexpected download: " <> t
   when (not $ null downloadInstructions) $ do
     putStrLn $ "Manual instructions:"
-    putStrLn $ "$ cd " <> fpToText dir
+    putStrLn $ "$ cd " <> Text.pack dir
     mapM_ (putStrLn . ("$ " <>)) downloadInstructions
 
 justUnpackInstructions :: (MonadIO m) => Download -> FilePath -> FilePath -> m ()
@@ -426,14 +426,14 @@ justUnpackInstructions Download{..} dir _ = do
     go [] = return ()
     go ( (stripPrefix "tar xJf " -> Just file)
        : next
-       ) = unzipXZ dir (Path.fromText file) >> go next
+       ) = unzipXZ dir (Text.unpack file) >> go next
     go ( (stripPrefix "rm " -> Just _file)
        : next
        ) = go next -- already done in unzipXZ
     go (t:_) = fail $ "command not recognized: " <> unpack t
 
 
-expectGhcInstructions :: (MonadIO m) => Download -> Path.FilePath -> Path.FilePath -> m ()
+expectGhcInstructions :: (MonadIO m) => Download -> FilePath -> FilePath -> m ()
 expectGhcInstructions Download{..} dir versionedDir =
     liftIO $ go downloadInstructions
   where
@@ -441,7 +441,7 @@ expectGhcInstructions Download{..} dir versionedDir =
     go [] = return ()
     go ( (stripPrefix "tar xJf " -> Just file)
        : next
-       ) = unzipXZ dir (Path.fromText file) >> go next
+       ) = unzipXZ dir (Text.unpack file) >> go next
     go ( (stripPrefix "rm ghc-" -> Just _file)
        : next
        ) = go next -- already done in unzipXZ
@@ -455,34 +455,34 @@ expectGhcInstructions Download{..} dir versionedDir =
     go (t:_) = fail $ "command not recognized: " <> unpack t
 
 
-inDir :: Path.FilePath -> IO a -> IO a
+inDir :: FilePath -> IO a -> IO a
 inDir dir action = do
-  workingDir <- getWorkingDirectory
-  let enter = setWorkingDirectory dir
-      exit = setWorkingDirectory workingDir
+  currentDir <- getCurrentDirectory
+  let enter = setCurrentDirectory dir
+      exit = setCurrentDirectory currentDir
   bracket_ enter exit action
 
 
-ghcConfigureInstall :: (MonadIO m) => Path.FilePath -> m ()
+ghcConfigureInstall :: (MonadIO m) => FilePath -> m ()
 ghcConfigureInstall versionedDir = liftIO $ do
   let srcDir = versionedDir <.> "src"
-  whenM (isDirectory srcDir) $ removeTree srcDir -- TODO: reuse instead
-  rename versionedDir srcDir
-  createTree versionedDir
+  whenM (doesDirectoryExist srcDir) $ removeDirectoryRecursive srcDir -- TODO: reuse instead
+  renameDirectory versionedDir srcDir
+  createDirectoryIfMissing True versionedDir
   let go = inDir srcDir $ do
-        callProcess "./configure" ["--prefix=" <> Path.encodeString versionedDir]
+        callProcess "./configure" ["--prefix=" <> versionedDir]
         callProcess "make" ["install"]
-  go `onException` removeTree versionedDir
-  removeTree srcDir
+  go `onException` removeDirectoryRecursive versionedDir
+  removeDirectoryRecursive srcDir
 
-expectCabalInstructions :: (MonadIO m) => Download -> Path.FilePath -> Path.FilePath -> m ()
+expectCabalInstructions :: (MonadIO m) => Download -> FilePath -> FilePath -> m ()
 expectCabalInstructions Download{..} dir versionedDir =
     liftIO $ rememberingOldCabal $ go downloadInstructions
   where
     go [] = return ()
     go ( (stripPrefix "tar xzf " -> Just file)
        : next
-       ) = unzipGZ dir (Path.fromText file) >> go next
+       ) = unzipGZ dir (Text.unpack file) >> go next
     go ( (stripPrefix "rm cabal-install-" ->
           Just (stripSuffix ".tar.gz" -> Just _file))
        : next
@@ -503,33 +503,33 @@ expectCabalInstructions Download{..} dir versionedDir =
 
 cabalBootstrap :: FilePath -> Text -> IO ()
 cabalBootstrap dir version = do
-  let cabalInstallVersionedDir = dir </> Path.fromText ("cabal-install-" <> version)
+  let cabalInstallVersionedDir = dir </> Text.unpack ("cabal-install-" <> version)
   inDir cabalInstallVersionedDir $ do
     callProcess "./bootstrap.sh" []
-  removeTree cabalInstallVersionedDir
+  removeDirectoryRecursive cabalInstallVersionedDir
 
 cabalMoveExe :: FilePath -> IO ()
 cabalMoveExe versionedDir = do
   let versionedDirBin = versionedDir </> "bin"
-  createTree versionedDirBin
+  createDirectoryIfMissing True versionedDirBin
   homeCabal <- getHomeCabal
-  rename homeCabal (versionedDirBin </> "cabal")
+  renameFile homeCabal (versionedDirBin </> "cabal")
 
 getHomeCabal :: IO FilePath
 getHomeCabal = do
   -- TODO: errors
   Just home <- lookupEnv "HOME"
-  return $ Path.decodeString home </> ".cabal" </> "bin" </> "cabal"
+  return $ home </> ".cabal" </> "bin" </> "cabal"
 
 rememberingOldCabal :: IO a -> IO a
 rememberingOldCabal action = do
   homeCabal <- getHomeCabal
-  exists <- isFile homeCabal
+  exists <- doesFileExist homeCabal
   if exists
     then do
       let tempCabal = homeCabal <.> "old"
-          toTemp = rename homeCabal tempCabal
-          fromTemp = rename tempCabal homeCabal
+          toTemp = renameFile homeCabal tempCabal
+          fromTemp = renameFile tempCabal homeCabal
       bracket_ toTemp fromTemp action
     else action
 
@@ -540,12 +540,12 @@ download ::
   , MonadThrow m
   , MonadReader env m
   , HasHttpManager env
-  ) => String -> String -> Path.FilePath -> m ()
+  ) => String -> String -> FilePath -> m ()
 download url sha1 dir = do
   -- TODO: deal with partial function last
   let fname = List.drop (List.last slashes + 1) url
       slashes = List.findIndices (== '/') url
-      file = dir </> Path.decodeString fname
+      file = dir </> fname
   putStrLn $ "Downloading: " <> pack fname
   req0 <- parseUrl url
   let req = req0
@@ -562,47 +562,47 @@ download url sha1 dir = do
 
 -- TODO: make cross platform
 unzipDownload :: (MonadIO m)
-  => Path.FilePath -> Path.FilePath -> m ()
-unzipDownload dir file = case stripSuffix ".tar.xz" (fpToText file) of
+  => FilePath -> FilePath -> m ()
+unzipDownload dir file = case stripSuffix ".tar.xz" (Text.pack file) of
   Just{} -> unzipXZ dir file
-  _ -> case stripSuffix ".tar.gz" (fpToText file) of
+  _ -> case stripSuffix ".tar.gz" (Text.pack file) of
     Just {} -> unzipGZ dir file
     _ -> fail $ "unzipDownload: unknown extension"
   -- TODO: other extensions
 
 -- TODO: make cross platform
 unzipXZ :: (MonadIO m)
-  => Path.FilePath -> Path.FilePath -> m ()
+  => FilePath -> FilePath -> m ()
 unzipXZ dir file = liftIO $ inDir dir $ do
   putStrLn "Decompressing XZ archive"
   callProcess "tar"
     ["xJf"
-    , Path.encodeString file
+    , file
     ]
   removeFile file
 
 
 -- TODO: make cross platform
 unzipGZ :: (MonadIO m)
-  => Path.FilePath -> Path.FilePath -> m ()
+  => FilePath -> FilePath -> m ()
 unzipGZ dir file = liftIO $ inDir dir $ do
   putStrLn "Decompressing GZ archive"
   callProcess "tar"
     ["xzf"
-    , Path.encodeString file
+    , file
     ]
   removeFile file
 
-downloadDir :: Text -> Path.FilePath
+downloadDir :: Text -> FilePath
 downloadDir name =
-  "environment" </> Path.fromText name
+  "environment" </> Text.unpack name
 
-downloadPath :: Text -> Text -> Path.FilePath
+downloadPath :: Text -> Text -> FilePath
 downloadPath name version =
-  Path.fromText (name <> "-" <> version)
+  Text.unpack (name <> "-" <> version)
 
-snapshotsPath :: Path.FilePath
-snapshotsPath = Path.fromText "snapshots.json"
+snapshotsPath :: FilePath
+snapshotsPath = Text.unpack "snapshots.json"
 
-linksPath :: GhcMajorVersion -> Path.FilePath
-linksPath ghcMajorVersion = Path.fromText $ "ghc-" <> pack ghcMajorVersion <> "-links.yaml"
+linksPath :: GhcMajorVersion -> FilePath
+linksPath ghcMajorVersion = Text.unpack $ "ghc-" <> pack ghcMajorVersion <> "-links.yaml"
